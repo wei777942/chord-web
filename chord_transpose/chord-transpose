@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+export LD_LIBRARY_PATH="$ROOT/vendor/tessusr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+export TESSDATA_PREFIX="$ROOT/vendor/tessusr/share/tesseract-ocr/5/tessdata"
+export PATH="$ROOT/vendor/tessusr/bin:/usr/bin:$PATH"
+exec python3 "$ROOT/transpose.py" "$@"

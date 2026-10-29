@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>任務 {{ job_id }} — 和弦移調</title>
+  <style>
+    :root {
+      --bg: #0f1419; --card: #1a2332; --text: #e7ecf3; --muted: #8b9bb4;
+      --accent: #3d8bfd; --ok: #2dd4a8; --danger: #f87171; --border: #2a3548;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh;
+    }
+    .wrap { max-width: 640px; margin: 0 auto; padding: 2.5rem 1.25rem; }
+    h1 { font-size: 1.35rem; margin: 0 0 .5rem; }
+    .sub { color: var(--muted); font-size: .9rem; margin-bottom: 1.25rem; }
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+      padding: 1.4rem; box-shadow: 0 12px 40px rgba(0,0,0,.35);
+    }
+    .status { font-size: 1.1rem; font-weight: 600; }
+    .processing { color: #fbbf24; }
+    .done { color: var(--ok); }
+    .error { color: var(--danger); }
+    .spin {
+      display: inline-block; width: 14px; height: 14px; border: 2px solid #fbbf24;
+      border-top-color: transparent; border-radius: 50%; animation: spin .8s linear infinite;
+      vertical-align: -2px; margin-right: .4rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    a.dl {
+      display: inline-block; margin-top: 1rem; padding: .7rem 1.1rem; border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent), #5b6cff); color: #fff;
+      text-decoration: none; font-weight: 600;
+    }
+    table { width: 100%; border-collapse: collapse; margin-top: 1rem; font-size: .9rem; }
+    th, td { border-bottom: 1px solid var(--border); padding: .45rem .5rem; text-align: left; }
+    th { color: var(--muted); font-weight: 500; }
+    .back { display: inline-block; margin-top: 1.25rem; color: var(--muted); }
+    #extra { margin-top: .75rem; color: var(--muted); white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>任務狀態</h1>
+    <p class="sub">編號：<code>{{ job_id }}</code></p>
+    <div class="card">
+      <div id="status" class="status processing"><span class="spin"></span>處理中，通常需 1–3 分鐘…</div>
+      <div id="extra"></div>
+      <div id="actions"></div>
+      <div id="mapping"></div>
+    </div>
+    <a class="back" href="/">← 回到上傳頁</a>
+  </div>
+  <script>
+    const jobId = {{ job_id|tojson }};
+    async function poll() {
+      try {
+        const r = await fetch('/api/job/' + jobId);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const data = await r.json();
+        const st = document.getElementById('status');
+        const extra = document.getElementById('extra');
+        const actions = document.getElementById('actions');
+        const mapping = document.getElementById('mapping');
+
+        if (data.status === 'processing') {
+          st.className = 'status processing';
+          st.innerHTML = '<span class="spin"></span>' + (data.message || '處理中，通常需 1–3 分鐘…');
+          setTimeout(poll, 5000);
+          return;
+        }
+        if (data.status === 'error') {
+          st.className = 'status error';
+          st.textContent = '錯誤';
+          extra.textContent = data.message || '未知錯誤';
+          return;
+        }
+        // done
+        st.className = 'status done';
+        st.textContent = '完成';
+        let info = '';
+        if (data.count != null) info += '和弦數量：' + data.count + '\n';
+        if (data.message) info += data.message;
+        if (data.warnings && data.warnings.length) {
+          info += '\n\n⚠ ' + data.warnings.join('\n⚠ ');
+        }
+        extra.textContent = info.trim();
+        if (data.warnings && data.warnings.length) {
+          extra.style.color = '#fbbf24';
+        }
+        actions.innerHTML = '';
+        if (data.download) {
+          const a = document.createElement('a');
+          a.className = 'dl';
+          a.href = data.download;
+          a.textContent = '下載結果檔案';
+          actions.appendChild(a);
+        }
+        mapping.innerHTML = '';
+        if (data.mapping && typeof data.mapping === 'object') {
+          const entries = Array.isArray(data.mapping)
+            ? data.mapping.map(x => [x.from || x[0], x.to || x[1]])
+            : Object.entries(data.mapping);
+          if (entries.length) {
+            let html = '<table><thead><tr><th>原和弦</th><th>移調後</th></tr></thead><tbody>';
+            for (const [a, b] of entries) {
+              html += '<tr><td>' + esc(String(a)) + '</td><td>' + esc(String(b)) + '</td></tr>';
+            }
+            html += '</tbody></table>';
+            mapping.innerHTML = html;
+          }
+        }
+      } catch (e) {
+        document.getElementById('extra').textContent = '輪詢失敗，5 秒後重試…';
+        setTimeout(poll, 5000);
+      }
+    }
+    function esc(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+    poll();
+  </script>
+</body>
+</html>

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>和弦移調上傳</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --accent: #3d8bfd;
+      --accent2: #2dd4a8;
+      --danger: #f87171;
+      --border: #2a3548;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #1b2a44, transparent),
+                  radial-gradient(900px 500px at 100% 0%, #13281f, transparent), var(--bg);
+      color: var(--text); min-height: 100vh;
+    }
+    .wrap { max-width: 560px; margin: 0 auto; padding: 2.5rem 1.25rem; }
+    h1 { font-size: 1.6rem; margin: 0 0 .35rem; letter-spacing: .02em; }
+    .sub { color: var(--muted); margin-bottom: 1.5rem; font-size: .95rem; }
+    .card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+      padding: 1.4rem 1.35rem; box-shadow: 0 12px 40px rgba(0,0,0,.35);
+    }
+    label { display: block; font-size: .85rem; color: var(--muted); margin: .9rem 0 .35rem; }
+    input[type=file], input[type=password], select {
+      width: 100%; padding: .7rem .8rem; border-radius: 8px;
+      border: 1px solid var(--border); background: #0d121a; color: var(--text);
+      font-size: 1rem;
+    }
+    input[type=file] { padding: .55rem; }
+    .modes { display: flex; gap: .75rem; margin-top: .4rem; }
+    .modes label { margin: 0; color: var(--text); display: flex; align-items: center; gap: .4rem; cursor: pointer; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
+    button {
+      margin-top: 1.25rem; width: 100%; padding: .85rem; border: 0; border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), #5b6cff); color: white;
+      font-size: 1.05rem; font-weight: 600; cursor: pointer;
+    }
+    button:hover { filter: brightness(1.08); }
+    .err {
+      background: rgba(248,113,113,.12); border: 1px solid rgba(248,113,113,.4);
+      color: #fecaca; padding: .75rem 1rem; border-radius: 8px; margin-bottom: 1rem;
+    }
+    .hint { font-size: .8rem; color: var(--muted); margin-top: .5rem; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>樂譜和弦移調</h1>
+    <p class="sub">上傳 PNG / JPG / PDF，選擇目標調性後送出處理。</p>
+    <div class="card">
+      {% if error %}
+      <div class="err">{{ error }}</div>
+      {% endif %}
+      <form method="post" action="/upload" enctype="multipart/form-data" id="form">
+        <label for="file">樂譜檔案（最大 20MB）</label>
+        <input type="file" id="file" name="file" accept=".png,.jpg,.jpeg,.pdf,image/png,image/jpeg,application/pdf" required>
+
+        <label>移調方式</label>
+        <div class="modes">
+          <label><input type="radio" name="mode" value="semitones" checked onchange="toggleMode()"> 半音數</label>
+          <label><input type="radio" name="mode" value="keys" onchange="toggleMode()"> 原調 → 目標調</label>
+        </div>
+
+        <div id="semi-panel">
+          <label for="semitones">半音數（-11～11）</label>
+          <select id="semitones" name="semitones">
+            {% for s in semitone_range %}
+            <option value="{{ s }}" {% if s == 0 %}selected{% endif %}>{% if s > 0 %}+{% endif %}{{ s }}</option>
+            {% endfor %}
+          </select>
+          <label for="spell_key">目標調（拼寫用，可選）</label>
+          <select id="spell_key" name="spell_key">
+            <option value="">自動</option>
+            {% for k in keys %}<option value="{{ k }}">{{ k }}</option>{% endfor %}
+          </select>
+        </div>
+
+        <div id="keys-panel" class="hidden">
+          <div class="row2">
+            <div>
+              <label for="from_key">原調</label>
+              <select id="from_key" name="from_key">
+                {% for k in keys %}<option value="{{ k }}">{{ k }}</option>{% endfor %}
+              </select>
+            </div>
+            <div>
+              <label for="to_key">目標調</label>
+              <select id="to_key" name="to_key">
+                {% for k in keys %}<option value="{{ k }}">{{ k }}</option>{% endfor %}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <label for="password">存取密碼</label>
+        <input type="password" id="password" name="password" required autocomplete="current-password" placeholder="請輸入共用密碼">
+
+        <button type="submit">上傳並移調</button>
+        <p class="hint">上傳後自動辨識並移調（約數十秒）。每個 IP 每小時最多 10 個任務。</p>
+      </form>
+    </div>
+  </div>
+  <script>
+    function toggleMode() {
+      const keys = document.querySelector('input[name=mode][value=keys]').checked;
+      document.getElementById('semi-panel').classList.toggle('hidden', keys);
+      document.getElementById('keys-panel').classList.toggle('hidden', !keys);
+    }
+  </script>
+</body>
+</html>
