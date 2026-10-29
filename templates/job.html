@@ -83,6 +83,7 @@
         st.className = 'status done';
         st.textContent = '完成';
         let info = '';
+        if (data.detected_key) info += '偵測原調：' + data.detected_key + '\n';
         if (data.count != null) info += '和弦數量：' + data.count + '\n';
         if (data.message) info += data.message;
         if (data.warnings && data.warnings.length) {

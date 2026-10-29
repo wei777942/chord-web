@@ -30,14 +30,41 @@
       padding: 1.4rem 1.35rem; box-shadow: 0 12px 40px rgba(0,0,0,.35);
     }
     label { display: block; font-size: .85rem; color: var(--muted); margin: .9rem 0 .35rem; }
-    input[type=file], input[type=password], select {
+    input[type=password], select {
       width: 100%; padding: .7rem .8rem; border-radius: 8px;
       border: 1px solid var(--border); background: #0d121a; color: var(--text);
       font-size: 1rem;
     }
-    input[type=file] { padding: .55rem; }
-    .modes { display: flex; gap: .75rem; margin-top: .4rem; }
-    .modes label { margin: 0; color: var(--text); display: flex; align-items: center; gap: .4rem; cursor: pointer; }
+    .dropzone {
+      margin-top: .35rem;
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 2.2rem 1.2rem;
+      text-align: center;
+      color: var(--muted);
+      background: #0d121a;
+      cursor: pointer;
+      transition: border-color .15s, background .15s, color .15s;
+      user-select: none;
+      min-height: 120px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: .45rem;
+    }
+    .dropzone:hover { border-color: var(--accent); color: var(--text); }
+    .dropzone.dragover {
+      border-color: var(--accent2);
+      background: rgba(45, 212, 168, .08);
+      color: var(--accent2);
+    }
+    .dropzone.has-file { border-style: solid; border-color: var(--accent); color: var(--text); }
+    .dropzone .dz-main { font-size: 1.05rem; font-weight: 500; }
+    .dropzone .dz-name { font-size: .9rem; color: var(--accent2); word-break: break-all; }
+    .dropzone input[type=file] {
+      position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; clip: rect(0,0,0,0);
+    }
     .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
     button {
       margin-top: 1.25rem; width: 100%; padding: .85rem; border: 0; border-radius: 10px;
@@ -50,55 +77,37 @@
       color: #fecaca; padding: .75rem 1rem; border-radius: 8px; margin-bottom: 1rem;
     }
     .hint { font-size: .8rem; color: var(--muted); margin-top: .5rem; }
-    .hidden { display: none; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>樂譜和弦移調</h1>
-    <p class="sub">上傳 PNG / JPG / PDF，選擇目標調性後送出處理。</p>
+    <p class="sub">上傳 PNG / JPG / PDF，選擇原調與目標調後送出處理。</p>
     <div class="card">
       {% if error %}
       <div class="err">{{ error }}</div>
       {% endif %}
       <form method="post" action="/upload" enctype="multipart/form-data" id="form">
-        <label for="file">樂譜檔案（最大 20MB）</label>
-        <input type="file" id="file" name="file" accept=".png,.jpg,.jpeg,.pdf,image/png,image/jpeg,application/pdf" required>
-
-        <label>移調方式</label>
-        <div class="modes">
-          <label><input type="radio" name="mode" value="semitones" checked onchange="toggleMode()"> 半音數</label>
-          <label><input type="radio" name="mode" value="keys" onchange="toggleMode()"> 原調 → 目標調</label>
+        <label>樂譜檔案（最大 20MB）</label>
+        <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="把譜拖進來">
+          <div class="dz-main" id="dz-main">把譜拖進來（PNG / JPG / PDF）</div>
+          <div class="dz-name" id="dz-name" hidden></div>
+          <input type="file" id="file" name="file" accept=".png,.jpg,.jpeg,.pdf,image/png,image/jpeg,application/pdf" required>
         </div>
 
-        <div id="semi-panel">
-          <label for="semitones">半音數（-11～11）</label>
-          <select id="semitones" name="semitones">
-            {% for s in semitone_range %}
-            <option value="{{ s }}" {% if s == 0 %}selected{% endif %}>{% if s > 0 %}+{% endif %}{{ s }}</option>
-            {% endfor %}
-          </select>
-          <label for="spell_key">目標調（拼寫用，可選）</label>
-          <select id="spell_key" name="spell_key">
-            <option value="">自動</option>
-            {% for k in keys %}<option value="{{ k }}">{{ k }}</option>{% endfor %}
-          </select>
-        </div>
-
-        <div id="keys-panel" class="hidden">
-          <div class="row2">
-            <div>
-              <label for="from_key">原調</label>
-              <select id="from_key" name="from_key">
-                {% for k in keys %}<option value="{{ k }}">{{ k }}</option>{% endfor %}
-              </select>
-            </div>
-            <div>
-              <label for="to_key">目標調</label>
-              <select id="to_key" name="to_key">
-                {% for k in keys %}<option value="{{ k }}">{{ k }}</option>{% endfor %}
-              </select>
-            </div>
+        <div class="row2">
+          <div>
+            <label for="from_key">原調</label>
+            <select id="from_key" name="from_key">
+              <option value="auto" selected>自動判斷</option>
+              {% for k in keys %}<option value="{{ k }}">{{ k }}</option>{% endfor %}
+            </select>
+          </div>
+          <div>
+            <label for="to_key">目標調</label>
+            <select id="to_key" name="to_key">
+              {% for k in keys %}<option value="{{ k }}" {% if k == "G" %}selected{% endif %}>{{ k }}</option>{% endfor %}
+            </select>
           </div>
         </div>
 
@@ -111,11 +120,55 @@
     </div>
   </div>
   <script>
-    function toggleMode() {
-      const keys = document.querySelector('input[name=mode][value=keys]').checked;
-      document.getElementById('semi-panel').classList.toggle('hidden', keys);
-      document.getElementById('keys-panel').classList.toggle('hidden', !keys);
-    }
+    (function () {
+      const zone = document.getElementById('dropzone');
+      const input = document.getElementById('file');
+      const main = document.getElementById('dz-main');
+      const nameEl = document.getElementById('dz-name');
+
+      function setFile(file) {
+        if (!file) return;
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        zone.classList.add('has-file');
+        main.textContent = '已選擇檔案';
+        nameEl.hidden = false;
+        nameEl.textContent = file.name;
+      }
+
+      zone.addEventListener('click', function (e) {
+        if (e.target === input) return;
+        input.click();
+      });
+      zone.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          input.click();
+        }
+      });
+      input.addEventListener('change', function () {
+        if (input.files && input.files[0]) setFile(input.files[0]);
+      });
+      zone.addEventListener('dragenter', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        zone.classList.add('dragover');
+      });
+      zone.addEventListener('dragover', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        zone.classList.add('dragover');
+      });
+      zone.addEventListener('dragleave', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        if (!zone.contains(e.relatedTarget)) zone.classList.remove('dragover');
+      });
+      zone.addEventListener('drop', function (e) {
+        e.preventDefault(); e.stopPropagation();
+        zone.classList.remove('dragover');
+        const files = e.dataTransfer && e.dataTransfer.files;
+        if (files && files.length) setFile(files[0]);
+      });
+    })();
   </script>
 </body>
 </html>
