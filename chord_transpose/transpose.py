@@ -60,7 +60,7 @@ def has_cjk(text: str) -> bool:
 
 
 def fix_ocr_chord(raw: str) -> str:
-    """Normalize OCR quirks: Cc→C, Am?/Dm’?→Am7/Dm7, drop pure CJK."""
+    """Normalize OCR quirks: Cc→C, Am?/Dm’?→Am7/Dm7, #←H/t/4, drop pure CJK."""
     t = normalize_text(raw)
     if has_cjk(t) and "或" not in t:
         return ""
@@ -71,7 +71,13 @@ def fix_ocr_chord(raw: str) -> str:
         .replace("`", "")
         .replace("′", "")
     )
+    # trailing punctuation glued by OCR ("A," / "G.")
+    t = re.sub(r"[,.;:]+$", "", t)
     t = re.sub(r"^([A-G])\1$", r"\1", t)  # Cc -> C
+    # # often read as H, t, or 4: A/CH→A/C#, D/Ft→D/F#, FHm7→F#m7
+    t = re.sub(r"/([A-G])[Ht4]$", r"/\1#", t)
+    t = re.sub(r"^([A-G])[Ht4](?=/|$)", r"\1#", t)
+    t = re.sub(r"([A-G])H(m|\d|/|$)", r"\1#\2", t)
     m = re.match(r"^([A-G][#b]?m)\??$", t)
     if m and has_sup:
         return m.group(1) + "7"
@@ -175,9 +181,13 @@ def detect_via_staves(tess: str, env: dict, im: Image.Image) -> list[dict] | Non
     tops = find_staff_tops(im)
     if len(tops) < 2:
         return None
+    # Band height scales with image; ~80px was tuned for ~20px chord caps.
+    band_h = 80
+    if im.height >= 3000:
+        band_h = max(80, im.height // 40)
     found: list[dict] = []
     for top in tops:
-        y0, y1 = max(0, top - 80), max(1, top - 4)
+        y0, y1 = max(0, top - band_h), max(1, top - 4)
         words: list[dict] = []
         # Prefer binary@2x (recovers faint "C"); gray@2x as supplement. Skip 3x for speed.
         words.extend(
@@ -186,39 +196,16 @@ def detect_via_staves(tess: str, env: dict, im: Image.Image) -> list[dict] | Non
         words.extend(
             ocr_band_strip(tess, env, im, y0, y1, scale=2, binary=False, psm=6)
         )
-        band: list[dict] = []
-        for w in words:
-            t = fix_ocr_chord(w["text"])
-            if not is_valid_chord_token(t):
-                continue
-            if not (10 <= w["height"] <= 45 and 8 <= w["width"] <= 220):
-                continue
-            # reject clef / margin ghosts
-            if w["left"] < 200 and len(t) <= 1:
-                continue
-            cand = {
-                "text": t,
-                "left": w["left"],
-                "top": w["top"],
-                "width": w["width"],
-                "height": w["height"],
-                "conf": w["conf"],
-            }
-            if w["conf"] < 40:
-                cand["unconfident"] = True
-            band.append(cand)
+        band = collect_chord_words(words, loose=True)
+        band = [c for c in band if not (c["left"] < 200 and len(c["text"]) <= 1)]
+        for c in band:
+            if c["conf"] < 40:
+                c["unconfident"] = True
         band.sort(key=lambda c: c["left"])
         merged: list[dict] = []
         for c in band:
             if merged and abs(c["left"] - merged[-1]["left"]) < 35:
-                prev = merged[-1]
-                def score(x):
-                    return (
-                        1 if STRICT_CHORD_RE.match(x["text"]) else 0,
-                        len(x["text"]),
-                        x["conf"],
-                    )
-                if score(c) > score(prev):
+                if _cand_score(c) > _cand_score(merged[-1]):
                     merged[-1] = c
             else:
                 merged.append(c)
@@ -413,8 +400,199 @@ def run_tess_tsv(tess: str, env: dict, image_path: str, psm: int = 11) -> list[d
     return rows
 
 
-def chord_like_size(w: dict) -> bool:
-    return 14 <= w["height"] <= 42 and 8 <= w["width"] <= 220
+def chord_like_size(w: dict, loose: bool = False) -> bool:
+    h, wi = w["height"], w["width"]
+    if loose:
+        return 10 <= h <= 56 and 6 <= wi <= 280
+    return 12 <= h <= 48 and 8 <= wi <= 240
+
+
+TARGET_TEXT_PX = 31.0
+
+
+def estimate_text_height(tess: str, env: dict, im: Image.Image) -> float:
+    """Median chord-like word height in original pixels (quick OCR on ~1400px preview)."""
+    max_w = 1400
+    if im.width <= max_w:
+        preview, inv = im, 1.0
+    else:
+        inv = im.width / max_w
+        preview = im.resize(
+            (max_w, max(1, int(im.height / inv))), Image.Resampling.LANCZOS
+        )
+    gray = ImageOps.autocontrast(preview.convert("L"))
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        gray.save(f.name)
+        path = f.name
+    try:
+        words = run_tess_tsv(tess, env, path, psm=11)
+    finally:
+        os.unlink(path)
+    chord_hs: list[float] = []
+    all_hs: list[float] = []
+    for w in words:
+        if w["conf"] < 30:
+            continue
+        if not (5 <= w["height"] <= 120):
+            continue
+        all_hs.append(w["height"] * inv)
+        t = fix_ocr_chord(w["text"])
+        if is_valid_chord_token(t):
+            chord_hs.append(w["height"] * inv)
+    hs = sorted(chord_hs) if len(chord_hs) >= 4 else sorted(all_hs)
+    if len(hs) < 5:
+        return 0.0
+    return float(hs[len(hs) // 2])
+
+
+def scale_image_for_detect(
+    im: Image.Image, median_h: float, target: float = TARGET_TEXT_PX
+) -> tuple[Image.Image, float]:
+    """Resample so typical chord glyphs are ~target px. No-op if already in range."""
+    if median_h <= 0:
+        return im, 1.0
+    if 16.0 <= median_h <= 40.0:
+        return im, 1.0
+    sf = target / median_h
+    sf = max(0.18, min(2.5, sf))
+    if abs(sf - 1.0) < 0.06:
+        return im, 1.0
+    nw = max(1, int(round(im.width * sf)))
+    nh = max(1, int(round(im.height * sf)))
+    return im.resize((nw, nh), Image.Resampling.LANCZOS), sf
+
+
+def map_chord_bbox(c: dict, sf: float) -> dict:
+    """Map a chord dict's bbox from scaled image back to original pixels."""
+    if abs(sf - 1.0) < 1e-9:
+        return c
+    x, y, w, h = c["bbox"]
+    out = dict(c)
+    out["bbox"] = [
+        int(round(x / sf)),
+        int(round(y / sf)),
+        max(1, int(round(w / sf))),
+        max(1, int(round(h / sf))),
+    ]
+    return out
+
+
+def ocr_image_words(
+    tess: str, env: dict, im: Image.Image, binary: bool = False, psm: int = 11
+) -> list[dict]:
+    img2 = im.convert("L")
+    if binary and np is not None:
+        arr = np.array(img2)
+        img2 = Image.fromarray(np.where(arr < 160, 0, 255).astype(np.uint8))
+    else:
+        img2 = ImageOps.autocontrast(img2)
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        img2.save(f.name)
+        path = f.name
+    try:
+        return run_tess_tsv(tess, env, path, psm=psm)
+    finally:
+        os.unlink(path)
+
+
+def _cand_score(c: dict) -> tuple:
+    t = c["text"]
+    return (
+        2 if re.search(r"/[A-G]#", t) else (1 if "/" in t else 0),
+        1 if "#" in t else 0,
+        1 if STRICT_CHORD_RE.match(t) else 0,
+        len(t),
+        float(c.get("conf", 0)),
+    )
+
+
+def merge_chord_cands(cands: list[dict], xdist: int = 32, ydist: int = 24) -> list[dict]:
+    cands = sorted(cands, key=lambda c: (c["top"], c["left"]))
+    out: list[dict] = []
+    for c in cands:
+        hit = None
+        for i, p in enumerate(out):
+            if abs(c["top"] - p["top"]) < ydist and abs(c["left"] - p["left"]) < xdist:
+                hit = i
+                break
+        if hit is None:
+            out.append(c)
+        elif _cand_score(c) > _cand_score(out[hit]):
+            out[hit] = c
+    return out
+
+
+def reject_lyric_orphans(chords: list[dict]) -> list[dict]:
+    """Drop lyric-row ghosts: lone single letters, misaligned capitals, huge 'C' blobs."""
+    if not chords:
+        return chords
+    rows: list[list] = []
+    for c in sorted(chords, key=lambda x: x["top"]):
+        if rows and abs(c["top"] - rows[-1][0]) <= 32:
+            rows[-1][1].append(c)
+            rows[-1][0] = sum(x["top"] for x in rows[-1][1]) / len(rows[-1][1])
+        else:
+            rows.append([float(c["top"]), [c]])
+    kept: list[dict] = []
+    for _, members in rows:
+        # lyric / footer rows are often only bare capitals
+        if all(re.match(r"^[A-G]$", m["text"]) for m in members):
+            continue
+        anchors = [m for m in members if len(m["text"]) >= 2] or members
+        tops = sorted(m["top"] for m in anchors)
+        med_t = tops[len(tops) // 2]
+        for m in members:
+            if len(m["text"]) <= 1 and m["width"] > max(90, int(m["height"] * 2.2)):
+                continue
+            if re.match(r"^[A-G]$", m["text"]):
+                # Chord rows share a top line; slash glyphs are often taller, so
+                # compare tops (not bottoms) with a forgiving tolerance.
+                if abs(m["top"] - med_t) > 22:
+                    continue
+            kept.append(m)
+    return merge_chord_cands(kept, xdist=36, ydist=26)
+
+
+def collect_chord_words(words: list[dict], loose: bool = True) -> list[dict]:
+    """Filter OCR words into chord candidates; slash chords allowed at low conf."""
+    found: list[dict] = []
+    for w in words:
+        t = fix_ocr_chord(w["text"])
+        if not is_valid_chord_token(t):
+            continue
+        is_slash = "/" in t
+        if is_slash:
+            # accept low-confidence slash when grammar matches strictly
+            if not (CHORD_RE.match(t) or STRICT_CHORD_RE.match(t)):
+                continue
+            if w["conf"] < 0:
+                continue
+        else:
+            if w["conf"] < 48:
+                continue
+            # bare X# is almost always OCR noise on these sheets (D + speck → D#)
+            if re.match(r"^[A-G]#$", t):
+                continue
+        ww = dict(w)
+        # OCR often glues underlines / bars into the box ("A,", tall "G")
+        if len(t) <= 2:
+            if ww["width"] > max(85, int(ww["height"] * 2.2)):
+                ww["width"] = max(12, int(min(ww["height"], 40) * 0.9))
+            if ww["height"] > 48:
+                ww["height"] = max(22, min(40, int(ww["width"] * 1.15) if ww["width"] else 32))
+        if not chord_like_size(ww, loose=loose):
+            continue
+        found.append(
+            {
+                "text": t,
+                "left": ww["left"],
+                "top": ww["top"],
+                "width": ww["width"],
+                "height": ww["height"],
+                "conf": ww["conf"],
+            }
+        )
+    return found
 
 
 def cluster_bands(seeds: list[dict], tol: int = 28) -> list[tuple[int, int, list]]:
@@ -510,87 +688,68 @@ def split_compound_ocr(
 
 
 
-def detect_page(
-    tess: str, env: dict, im: Image.Image, page: int
-) -> list[dict]:
-    """Detect chord symbols. Prefer staff-band OCR for 五線譜; else full-page."""
-    staff_hits = detect_via_staves(tess, env, im)
-    if staff_hits is not None:
-        out = []
-        for i, c in enumerate(staff_hits):
-            item = {
-                "page": page,
-                "index": i,
-                "text": c["text"],
-                "bbox": [c["left"], c["top"], c["width"], c["height"]],
-                "conf": round(float(c["conf"]), 1),
-            }
-            if c.get("unconfident"):
-                item["unconfident"] = True
-            out.append(item)
-        return out
+def detect_page_jianpu(tess: str, env: dict, im: Image.Image) -> list[dict]:
+    """Full-page multi-pass OCR for 簡譜 / sheets without clear staves."""
+    all_c: list[dict] = []
+    for binary in (False, True):
+        all_c.extend(
+            collect_chord_words(ocr_image_words(tess, env, im, binary=binary, psm=11))
+        )
 
-    # --- fallback: full-page OCR (簡譜 / no clear staves) ---
+    seeds = [
+        c
+        for c in all_c
+        if c["conf"] >= 45 or ("/" in c["text"] and CHORD_RE.match(c["text"]))
+    ]
+    bands = cluster_bands(seeds, tol=34)
+    bands = [b for b in bands if len(b[2]) >= 2] or [b for b in bands if len(b[2]) >= 1]
+
+    def in_band(w: dict, ymin: int, ymax: int, pad: int = 32) -> bool:
+        cy = w["top"] + w["height"] // 2
+        return (ymin - pad) <= cy <= (ymax + pad)
+
+    banded: list[dict] = []
+    for c in all_c:
+        for ymin, ymax, _ in bands:
+            if in_band(c, ymin, ymax):
+                banded.append(c)
+                break
+
+    for ymin, ymax, _ in bands:
+        pad = 28
+        y0 = max(0, ymin - pad)
+        y1 = min(im.height, ymax + pad)
+        for binary in (False, True):
+            for scale in (1, 2):
+                words = ocr_band_strip(
+                    tess, env, im, y0, y1, scale=scale, binary=binary, psm=6
+                )
+                for w in words:
+                    # strip trailing punct width blow-up before collect
+                    t0 = fix_ocr_chord(w["text"])
+                    if (
+                        t0
+                        and re.match(r"^[A-G]$", t0)
+                        and w["width"] > w["height"] * 2
+                    ):
+                        w = {**w, "width": max(12, int(w["height"] * 0.9))}
+                    banded.extend(collect_chord_words([w], loose=True))
+
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        im.save(f.name)
+        ImageOps.autocontrast(im.convert("L")).save(f.name)
         img_path = f.name
     try:
-        words = run_tess_tsv(tess, env, img_path, psm=11)
+        raw_words = run_tess_tsv(tess, env, img_path, psm=11)
     finally:
         os.unlink(img_path)
-
-    seeds = []
-    for w in words:
-        t = fix_ocr_chord(w["text"])
-        if (
-            is_valid_chord_token(t)
-            and w["conf"] >= 50
-            and chord_like_size(w)
-            and w["width"] <= 100
-        ):
-            seeds.append({**w, "text": t})
-
-    bands = cluster_bands(seeds)
-    bands = [b for b in bands if len(b[2]) >= 2]
-    if not bands:
-        bands = cluster_bands(seeds)
-        bands = [b for b in bands if len(b[2]) >= 1]
-
-    def in_band(w, ymin, ymax):
-        cy = w["top"] + w["height"] // 2
-        return (ymin - 10) <= cy <= (ymax + 10)
-
-    found: list[dict] = []
-
-    for w in words:
-        t = fix_ocr_chord(w["text"])
-        if not chord_like_size(w):
-            continue
-        if not is_valid_chord_token(t):
-            continue
-        for ymin, ymax, _ in bands:
-            if not in_band(w, ymin, ymax):
-                continue
-            found.append(
-                {
-                    "text": t,
-                    "left": w["left"],
-                    "top": w["top"],
-                    "width": w["width"],
-                    "height": w["height"],
-                    "conf": w["conf"],
-                }
-            )
-            break
-
-    for w in words:
+    for w in raw_words:
         raw = normalize_text(w["text"])
         t = fix_ocr_chord(w["text"])
         if is_valid_chord_token(t):
             continue
         if has_cjk(raw) and "或" not in raw:
             continue
-        if not chord_like_size(w):
+        if not chord_like_size(w, loose=True):
             continue
         for ymin, ymax, _ in bands:
             if not in_band(w, ymin, ymax):
@@ -605,6 +764,11 @@ def detect_page(
                 )
                 recovered = split_compound_ocr(tess, env, im, box)
             if recovered and is_valid_chord_token(recovered.split("或")[0]):
+                # require both sides of 或 to be clean chords
+                if "或" in recovered:
+                    parts = recovered.split("或")
+                    if not all(CHORD_RE.match(p) for p in parts):
+                        break
                 cand = {
                     "text": recovered,
                     "left": w["left"],
@@ -613,75 +777,52 @@ def detect_page(
                     "height": w["height"],
                     "conf": w["conf"],
                 }
-                if not any(overlaps(cand, f) for f in found):
-                    found.append(cand)
+                if not any(overlaps(cand, f) for f in banded):
+                    banded.append(cand)
             break
 
-    for ymin, ymax, _ in bands:
-        pad = 10
-        y0 = max(0, ymin - pad)
-        y1 = min(im.height, ymax + pad)
-        strip = im.crop((0, y0, im.width, y1))
-        strip2 = strip.resize(
-            (strip.width * 2, strip.height * 2), Image.Resampling.LANCZOS
+    merged = reject_lyric_orphans(merge_chord_cands(banded, xdist=34, ydist=26))
+    merged.sort(key=lambda c: (c["top"], c["left"]))
+    return merged
+
+
+def detect_page(
+    tess: str, env: dict, im: Image.Image, page: int
+) -> list[dict]:
+    """Detect chord symbols. Auto-normalize scale; staff-band OCR or 簡譜 multi-pass."""
+    median_h = estimate_text_height(tess, env, im)
+    # Prefer ~34px: sharp enough for A/C# while staying inside size filters
+    scaled, sf = scale_image_for_detect(im, median_h, target=TARGET_TEXT_PX)
+    if abs(sf - 1.0) > 0.05:
+        print(
+            f"page {page}: normalize scale={sf:.3f} "
+            f"(median text ≈{median_h:.0f}px → ~{TARGET_TEXT_PX:.0f}px) "
+            f"{im.width}x{im.height} → {scaled.width}x{scaled.height}",
+            file=sys.stderr,
         )
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-            strip2.save(f.name)
-            sp = f.name
-        try:
-            swords = run_tess_tsv(tess, env, sp, psm=6)
-        finally:
-            os.unlink(sp)
-        for w in swords:
-            t = fix_ocr_chord(w["text"])
-            left = w["left"] // 2
-            top = w["top"] // 2 + y0
-            width = max(1, w["width"] // 2)
-            height = max(1, w["height"] // 2)
-            if not (14 <= height <= 42 and 8 <= width <= 120):
-                continue
-            if not is_valid_chord_token(t):
-                continue
-            cand = {
-                "text": t,
-                "left": left,
-                "top": top,
-                "width": width,
-                "height": height,
-                "conf": w["conf"],
-            }
-            if any(overlaps(cand, f, pad=12) for f in found):
-                continue
-            found.append(cand)
 
-    found.sort(key=lambda c: (c["top"], c["left"]))
-    final = []
-    for c in found:
-        if (
-            final
-            and abs(c["top"] - final[-1]["top"]) < 18
-            and abs(c["left"] - final[-1]["left"]) < 24
-        ):
-            prev = final[-1]
-            if len(c["text"]) > len(prev["text"]) or (
-                len(c["text"]) == len(prev["text"]) and c["conf"] > prev["conf"]
-            ):
-                final[-1] = c
-            continue
-        final.append(c)
+    staff_hits = detect_via_staves(tess, env, scaled)
+    if staff_hits is not None and len(staff_hits) >= 2:
+        hits = staff_hits
+    else:
+        hits = detect_page_jianpu(tess, env, scaled)
 
+    hits.sort(key=lambda c: (c["top"], c["left"]))
     out = []
-    for i, c in enumerate(final):
+    for i, c in enumerate(hits):
         item = {
             "page": page,
             "index": i,
             "text": c["text"],
             "bbox": [c["left"], c["top"], c["width"], c["height"]],
-            "conf": round(c["conf"], 1),
+            "conf": round(float(c["conf"]), 1),
         }
-        if c.get("conf", 100) < 45:
+        item = map_chord_bbox(item, sf)
+        if c.get("unconfident") or float(c.get("conf", 100)) < 45:
             item["unconfident"] = True
         out.append(item)
+    for i, item in enumerate(out):
+        item["index"] = i
     return out
 
 
