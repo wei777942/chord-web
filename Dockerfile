@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr-eng \
         poppler-utils \
         fonts-liberation \
-        fonts-noto-cjk \
+        fonts-wqy-zenhei \
         fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 

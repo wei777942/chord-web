@@ -138,7 +138,10 @@ def run_transpose_job(job_dir: Path, fname: str, semitones: int, spell_key: str 
             "--out",
             str(chords_json),
         ]
-        subprocess.check_call(cmd_detect, cwd=str(BASE), timeout=120)
+        try:
+            subprocess.check_output(cmd_detect, cwd=str(BASE), timeout=300, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"detect failed: {e.output[-2000:] if e.output else e}") from e
 
         chords_data = json.loads(chords_json.read_text(encoding="utf-8"))
         chords = chords_data.get("chords", [])
@@ -161,7 +164,10 @@ def run_transpose_job(job_dir: Path, fname: str, semitones: int, spell_key: str 
         ]
         if spell_key:
             cmd_apply.extend(["--key", spell_key])
-        subprocess.check_call(cmd_apply, cwd=str(BASE), timeout=120)
+        try:
+            subprocess.check_output(cmd_apply, cwd=str(BASE), timeout=300, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"apply failed: {e.output[-2000:] if e.output else e}") from e
 
         # parse mapping markdown if present
         map_path = out_img.with_suffix(".map.md")

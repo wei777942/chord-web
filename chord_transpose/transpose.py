@@ -27,6 +27,7 @@ FONT_CANDIDATES = [
     "/usr/share/fonts/opentype/urw-base35/NimbusSans-Bold.otf",
 ]
 CJK_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
@@ -178,13 +179,13 @@ def detect_via_staves(tess: str, env: dict, im: Image.Image) -> list[dict] | Non
     for top in tops:
         y0, y1 = max(0, top - 80), max(1, top - 4)
         words: list[dict] = []
-        for binary in (False, True):
-            for scale in (2, 3):
-                words.extend(
-                    ocr_band_strip(
-                        tess, env, im, y0, y1, scale=scale, binary=binary, psm=6
-                    )
-                )
+        # Prefer binary@2x (recovers faint "C"); gray@2x as supplement. Skip 3x for speed.
+        words.extend(
+            ocr_band_strip(tess, env, im, y0, y1, scale=2, binary=True, psm=6)
+        )
+        words.extend(
+            ocr_band_strip(tess, env, im, y0, y1, scale=2, binary=False, psm=6)
+        )
         band: list[dict] = []
         for w in words:
             t = fix_ocr_chord(w["text"])
