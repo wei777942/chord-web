@@ -260,7 +260,7 @@ def run_transpose_job(
             str(chords_json),
         ]
         try:
-            subprocess.check_output(cmd_detect, cwd=str(BASE), timeout=300, stderr=subprocess.STDOUT)
+            subprocess.check_output(cmd_detect, cwd=str(BASE), timeout=480, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"detect failed: {e.output[-2000:] if e.output else e}") from e
 
@@ -326,7 +326,7 @@ def run_transpose_job(
             spell_key,
         ]
         try:
-            subprocess.check_output(cmd_apply, cwd=str(BASE), timeout=300, stderr=subprocess.STDOUT)
+            subprocess.check_output(cmd_apply, cwd=str(BASE), timeout=480, stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"apply failed: {e.output[-2000:] if e.output else e}") from e
 

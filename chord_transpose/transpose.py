@@ -689,7 +689,12 @@ def split_compound_ocr(
 
 
 def detect_page_jianpu(tess: str, env: dict, im: Image.Image) -> list[dict]:
-    """Full-page multi-pass OCR for 簡譜 / sheets without clear staves."""
+    """Full-page multi-pass OCR for 簡譜 / sheets without clear staves.
+
+    Keep the pass count small: two full-page OCR modes, then band strips at
+    2x only (gray+binary). Optional cheap string-garble recovery; skip the
+    expensive per-box re-OCR unless recall looks thin.
+    """
     all_c: list[dict] = []
     for binary in (False, True):
         all_c.extend(
@@ -719,69 +724,56 @@ def detect_page_jianpu(tess: str, env: dict, im: Image.Image) -> list[dict]:
         pad = 28
         y0 = max(0, ymin - pad)
         y1 = min(im.height, ymax + pad)
+        # scale=2 only: scale=1 doubles wall time on weak hosts with little recall gain
         for binary in (False, True):
-            for scale in (1, 2):
-                words = ocr_band_strip(
-                    tess, env, im, y0, y1, scale=scale, binary=binary, psm=6
-                )
-                for w in words:
-                    # strip trailing punct width blow-up before collect
-                    t0 = fix_ocr_chord(w["text"])
-                    if (
-                        t0
-                        and re.match(r"^[A-G]$", t0)
-                        and w["width"] > w["height"] * 2
-                    ):
-                        w = {**w, "width": max(12, int(w["height"] * 0.9))}
-                    banded.extend(collect_chord_words([w], loose=True))
-
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        ImageOps.autocontrast(im.convert("L")).save(f.name)
-        img_path = f.name
-    try:
-        raw_words = run_tess_tsv(tess, env, img_path, psm=11)
-    finally:
-        os.unlink(img_path)
-    for w in raw_words:
-        raw = normalize_text(w["text"])
-        t = fix_ocr_chord(w["text"])
-        if is_valid_chord_token(t):
-            continue
-        if has_cjk(raw) and "或" not in raw:
-            continue
-        if not chord_like_size(w, loose=True):
-            continue
-        for ymin, ymax, _ in bands:
-            if not in_band(w, ymin, ymax):
-                continue
-            recovered = recover_garbled(raw, w["width"])
-            if not recovered and w["width"] >= 100:
-                box = (
-                    w["left"],
-                    w["top"],
-                    w["left"] + w["width"],
-                    w["top"] + w["height"],
-                )
-                recovered = split_compound_ocr(tess, env, im, box)
-            if recovered and is_valid_chord_token(recovered.split("或")[0]):
-                # require both sides of 或 to be clean chords
-                if "或" in recovered:
-                    parts = recovered.split("或")
-                    if not all(CHORD_RE.match(p) for p in parts):
-                        break
-                cand = {
-                    "text": recovered,
-                    "left": w["left"],
-                    "top": w["top"],
-                    "width": w["width"],
-                    "height": w["height"],
-                    "conf": w["conf"],
-                }
-                if not any(overlaps(cand, f) for f in banded):
-                    banded.append(cand)
-            break
+            words = ocr_band_strip(
+                tess, env, im, y0, y1, scale=2, binary=binary, psm=6
+            )
+            for w in words:
+                t0 = fix_ocr_chord(w["text"])
+                if (
+                    t0
+                    and re.match(r"^[A-G]$", t0)
+                    and w["width"] > w["height"] * 2
+                ):
+                    w = {**w, "width": max(12, int(w["height"] * 0.9))}
+                banded.extend(collect_chord_words([w], loose=True))
 
     merged = reject_lyric_orphans(merge_chord_cands(banded, xdist=34, ydist=26))
+    # Cheap string recovery if a band looks sparse (reuse gray words already OCR'd)
+    if bands and len(merged) < max(8, len(bands) * 2):
+        raw_words = ocr_image_words(tess, env, im, binary=False, psm=11)
+        for w in raw_words:
+            raw = normalize_text(w["text"])
+            t = fix_ocr_chord(w["text"])
+            if is_valid_chord_token(t):
+                continue
+            if has_cjk(raw) and "或" not in raw:
+                continue
+            if not chord_like_size(w, loose=True):
+                continue
+            for ymin, ymax, _ in bands:
+                if not in_band(w, ymin, ymax):
+                    continue
+                recovered = recover_garbled(raw, w["width"])
+                if recovered and is_valid_chord_token(recovered.split("或")[0]):
+                    if "或" in recovered:
+                        parts = recovered.split("或")
+                        if not all(CHORD_RE.match(p) for p in parts):
+                            break
+                    cand = {
+                        "text": recovered,
+                        "left": w["left"],
+                        "top": w["top"],
+                        "width": w["width"],
+                        "height": w["height"],
+                        "conf": w["conf"],
+                    }
+                    if not any(overlaps(cand, f) for f in banded):
+                        banded.append(cand)
+                break
+        merged = reject_lyric_orphans(merge_chord_cands(banded, xdist=34, ydist=26))
+
     merged.sort(key=lambda c: (c["top"], c["left"]))
     return merged
 
